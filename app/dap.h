@@ -8,8 +8,10 @@
 
 #include <stdint.h>
 
-#define DAP_PACKET_SIZE     64u
-#define DAP_PACKET_COUNT    4u
+/* Larger than the 64-byte USB FS max packet: TinyUSB splits the bulk
+ * transfer. 512 B cuts host round-trips for TransferBlock by ~8x vs 64. */
+#define DAP_PACKET_SIZE     512u
+#define DAP_PACKET_COUNT    2u
 
 void     dap_init(void);
 /* executes one request packet, returns the response length */

@@ -110,11 +110,18 @@ static bool write_page(uint32_t addr, const uint8_t *s, uint32_t len)
 
 static void led(bool on)
 {
-    RCC_APB2ENR |= 1u << 2;                         /* IOPA (LED port) */
+    RCC_APB2ENR |= RCC_APB2_IOPA | RCC_APB2_IOPB;
+#ifdef BOARD_LED_ACTIVE_HIGH
+    if (on)
+        GPIO_BSRR(LED_PORT) = 1u << LED_PIN;
+    else
+        GPIO_BRR(LED_PORT) = 1u << LED_PIN;
+#else
     if (on)
         GPIO_BRR(LED_PORT) = 1u << LED_PIN;
     else
         GPIO_BSRR(LED_PORT) = 1u << LED_PIN;
+#endif
     gpio_mode(LED_PORT, LED_PIN, GPIO_OUT_PP_2);
 }
 

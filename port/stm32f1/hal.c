@@ -70,16 +70,24 @@ static void clock_init(void)
 {
     clock_to_hsi();
     RCC_CR |= RCC_CR_HSEON;
-    for (uint32_t t = 0; !(RCC_CR & RCC_CR_HSERDY); t++)
-        if (t > 500000u)
-            break;                          /* no crystal: USB unusable */
+    bool hse = false;
+    for (uint32_t t = 0; t < 500000u; t++) {
+        if (RCC_CR & RCC_CR_HSERDY) {
+            hse = true;
+            break;
+        }
+    }
     FLASH_ACR = 0x12;                       /* prefetch, 2 wait states   */
-    /* PLL = HSE * 9 = 72 MHz, APB1 /2, APB2 /1, ADC /6, USB = PLL / 1.5 */
-    RCC_CFGR = (7u << 18) | (1u << 16) | (4u << 8) | (2u << 14);
-    RCC_CR |= RCC_CR_PLLON;
-    while (!(RCC_CR & RCC_CR_PLLRDY)) { }
-    RCC_CFGR = (RCC_CFGR & ~3u) | 2u;
-    while (((RCC_CFGR >> 2) & 3u) != 2u) { }
+    if (hse) {
+        /* PLL = HSE * 9 = 72 MHz, APB1 /2, APB2 /1, ADC /6, USB = PLL / 1.5 */
+        RCC_CFGR = (7u << 18) | (1u << 16) | (4u << 8) | (2u << 14);
+        RCC_CR |= RCC_CR_PLLON;
+        for (uint32_t t = 0; t < 500000u && !(RCC_CR & RCC_CR_PLLRDY); t++) { }
+        if (RCC_CR & RCC_CR_PLLRDY) {
+            RCC_CFGR = (RCC_CFGR & ~3u) | 2u;
+            while (((RCC_CFGR >> 2) & 3u) != 2u) { }
+        }
+    }
 
     DEMCR |= 1u << 24;
     DWT_CYCCNT = 0;
@@ -117,16 +125,17 @@ void hal_system_reset(void)
 
 void hal_init(void)
 {
-    clock_init();
-    SYST_RVR = SYSCLK_HZ / 1000u - 1u;
-    SYST_CVR = 0;
-    SYST_CSR = 7;
-
+    /* GPIO + LED before the PLL so a stuck HSE still shows life */
     RCC_APB2ENR |= RCC_APB2_AFIO | RCC_APB2_IOPA | RCC_APB2_IOPB | RCC_APB2_IOPC;
     /* SWD only: frees PA15, PB3 and PB4 */
     AFIO_MAPR = (AFIO_MAPR & ~(7u << 24)) | (2u << 24);
 
     hal_led(LED_RED);
+
+    clock_init();
+    SYST_RVR = SYSCLK_HZ / 1000u - 1u;
+    SYST_CVR = 0;
+    SYST_CSR = 7;
 }
 
 void hal_jump(uint32_t vt)
@@ -163,6 +172,33 @@ void hal_jump(uint32_t vt)
 /* LED                                                                */
 /* ------------------------------------------------------------------ */
 
+#if defined(LED_CON_PORT)
+
+/* two separate LEDs: LED_PORT = red/RUN, LED_CON_PORT = blue/CON */
+static void led_set(uint32_t port, unsigned pin, bool on)
+{
+#if defined(BOARD_LED_ACTIVE_HIGH)
+    if (on)
+        GPIO_BSRR(port) = 1u << pin;
+    else
+        GPIO_BRR(port) = 1u << pin;
+#else
+    if (on)
+        GPIO_BRR(port) = 1u << pin;
+    else
+        GPIO_BSRR(port) = 1u << pin;
+#endif
+    gpio_mode(port, pin, GPIO_OUT_PP_2);
+}
+
+void hal_led(enum hal_led s)
+{
+    led_set(LED_PORT, LED_PIN, s == LED_RED);
+    led_set(LED_CON_PORT, LED_CON_PIN, s == LED_BLUE);
+}
+
+#else
+
 /* the pin lights one LED high, the other low, neither tri-stated */
 void hal_led(enum hal_led s)
 {
@@ -177,6 +213,8 @@ void hal_led(enum hal_led s)
     gpio_mode(LED_PORT, LED_PIN, GPIO_OUT_PP_2);
 }
 
+#endif
+
 /* ------------------------------------------------------------------ */
 /* USB                                                                */
 /* ------------------------------------------------------------------ */
@@ -186,8 +224,14 @@ void USB_LP_IRQHandler(void) { tud_int_handler(0); }
 
 void hal_usb_disconnect(void)
 {
+#ifdef USB_RENUM_ACTIVE_LOW
+    /* PNP: base high = pull-up off */
+    GPIO_BSRR(USB_RENUM_PORT) = 1u << USB_RENUM_PIN;
+    gpio_mode(USB_RENUM_PORT, USB_RENUM_PIN, GPIO_OUT_PP_10);
+#else
     GPIO_BRR(USB_RENUM_PORT) = 1u << USB_RENUM_PIN;
     gpio_mode(USB_RENUM_PORT, USB_RENUM_PIN, GPIO_OUT_OD_10);
+#endif
     /* drive D+ low as well so the host notices immediately */
     GPIO_BRR(GPIOA_BASE) = 1u << 12;
     gpio_mode(GPIOA_BASE, 12, GPIO_OUT_PP_10);
@@ -201,8 +245,14 @@ void hal_usb_init(void)
     RCC_APB1ENR |= RCC_APB1_USB;
     RCC_APB1RSTR |= RCC_APB1_USB;
     RCC_APB1RSTR &= ~RCC_APB1_USB;
+#ifdef USB_RENUM_ACTIVE_LOW
+    /* PNP: base low = Q1 connects 1k5 to D+ */
+    GPIO_BRR(USB_RENUM_PORT) = 1u << USB_RENUM_PIN;
+    gpio_mode(USB_RENUM_PORT, USB_RENUM_PIN, GPIO_OUT_PP_10);
+#else
     /* release the pull-up: Q1 connects 1k5 to D+ */
     GPIO_BSRR(USB_RENUM_PORT) = 1u << USB_RENUM_PIN;
+#endif
     NVIC_IPR(19) = 0x40;
     NVIC_IPR(20) = 0x40;
 }
@@ -276,6 +326,8 @@ bool hal_flash_write(uint32_t addr, const void *data, uint32_t len)
 /* target interface                                                   */
 /* ------------------------------------------------------------------ */
 
+#ifdef VTARGET_ADC_CH
+
 static void adc_init(void)
 {
     RCC_APB2ENR |= RCC_APB2_ADC1;
@@ -310,26 +362,48 @@ void hal_target_voltage(uint32_t *vref, uint32_t *vtarget)
     *vtarget = adc_read(VTARGET_ADC_CH);
 }
 
+#else
+
+void hal_target_voltage(uint32_t *vref, uint32_t *vtarget)
+{
+    /* No sense pin: report raw values that look like ~3.3 V with a 1:2
+     * divider (Vdda = 3.3 V, Vrefint = 1.2 V). */
+    *vref = 1489u;
+    *vtarget = 2048u;
+}
+
+#endif
+
 void hal_target_nrst(bool assert)
 {
+#ifdef NRST_PORT
     if (assert)
         GPIO_BRR(NRST_PORT) = 1u << NRST_PIN;
     else
         GPIO_BSRR(NRST_PORT) = 1u << NRST_PIN;
+#else
+    (void)assert;
+#endif
 }
 
 void hal_target_init(void)
 {
+#ifdef NRST_PORT
     GPIO_BSRR(NRST_PORT) = 1u << NRST_PIN;
     gpio_mode(NRST_PORT, NRST_PIN, GPIO_OUT_OD_10);
+#endif
+#ifdef SWCLK_ALT_PORT
     gpio_mode(SWCLK_ALT_PORT, SWCLK_ALT_PIN, GPIO_IN_FLOAT);
+#endif
     gpio_mode(SWDIO_IN_PORT, SWDIO_IN_PIN, GPIO_IN_FLOAT);
     GPIO_BSRR(SWCLK_PORT) = 1u << SWCLK_PIN;
     gpio_mode(SWCLK_PORT, SWCLK_PIN, GPIO_OUT_PP_50);
     GPIO_BSRR(SWDIO_PORT) = 1u << SWDIO_PIN;
     gpio_mode(SWDIO_PORT, SWDIO_PIN, GPIO_OUT_PP_50);
     RCC_AHBENR |= RCC_AHB_DMA1;
+#ifdef VTARGET_ADC_CH
     adc_init();
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -493,13 +567,15 @@ void hal_vcp_set_break(bool on)
 }
 
 /* ------------------------------------------------------------------ */
-/* SWO: USART1 RX (PA10) by circular DMA (ch5)                         */
+/* SWO: USART1 RX by circular DMA (ch5), when the board has a pin     */
 /* ------------------------------------------------------------------ */
 
-/* 5 KiB: 25 ms at 2 Mbaud for a host that pauses its trace reads, while
- * leaving the stack its measured need (swo-status) plus 1 KiB. Not a power
- * of two, so the running counts are 64-bit. */
-#define SWO_SIZE 5120u
+#ifdef SWO_PORT
+
+/* 4 KiB: 20 ms at 2 Mbaud for a host that pauses its trace reads, while
+ * leaving room for CMSIS-DAP 512-byte packets and ~1.5 KiB of stack.
+ * Not a power of two, so the running counts are 64-bit. */
+#define SWO_SIZE 4096u
 static uint8_t swo_buf[SWO_SIZE];
 static volatile uint32_t swo_wraps;     /* completed DMA laps            */
 static uint64_t swo_tail;               /* bytes consumed, running count */
@@ -631,3 +707,44 @@ void hal_swo_consume(size_t n)
 {
     swo_tail += n;
 }
+
+#else
+
+bool hal_swo_start(uint32_t baud)
+{
+    (void)baud;
+    return false;
+}
+
+void hal_swo_stop(void) { }
+
+size_t hal_swo_size(void)
+{
+    return 0;
+}
+
+size_t hal_swo_available(void)
+{
+    return 0;
+}
+
+unsigned hal_swo_status(uint32_t *w, unsigned max)
+{
+    if (max > 0)
+        w[0] = 0;
+    return max ? 1u : 0;
+}
+
+size_t hal_swo_peek(const uint8_t **p)
+{
+    static const uint8_t empty;
+    *p = &empty;
+    return 0;
+}
+
+void hal_swo_consume(size_t n)
+{
+    (void)n;
+}
+
+#endif

@@ -4,8 +4,25 @@
 BOARD   ?= jolt_connect
 PORT    ?= stm32f1
 CROSS   ?= arm-none-eabi-
-LIBC_SPECS ?= /usr/arm-none-eabi/lib/picolibc.specs
-LIBC_INC   ?= /usr/arm-none-eabi/include
+
+# Prefer picolibc when present (Debian/Ubuntu); fall back to newlib-nano (Fedora).
+ifeq ($(origin LIBC_SPECS),undefined)
+  LIBC_SPECS := $(firstword $(wildcard \
+    /usr/lib/picolibc/arm-none-eabi/picolibc.specs \
+    /usr/arm-none-eabi/lib/picolibc.specs))
+  ifeq ($(LIBC_SPECS),)
+    LIBC_SPECS := /usr/arm-none-eabi/lib/nano.specs
+  endif
+endif
+ifeq ($(origin LIBC_INC),undefined)
+  ifneq ($(filter %/picolibc.specs,$(LIBC_SPECS)),)
+    _libc_dir := $(dir $(LIBC_SPECS))
+    LIBC_INC := $(if $(wildcard $(_libc_dir)include),$(_libc_dir)include,$(dir $(_libc_dir))include)
+  else
+    LIBC_INC := /usr/arm-none-eabi/include
+  endif
+endif
+
 CC      := $(CROSS)gcc
 OBJCOPY := $(CROSS)objcopy
 SIZE    := $(CROSS)size
@@ -15,6 +32,7 @@ TUSB    := lib/tinyusb/src
 PORTDIR := port/$(PORT)
 
 include $(PORTDIR)/port.mk
+-include boards/$(BOARD)/board.mk
 
 CFLAGS  += --specs=$(LIBC_SPECS) -isystem $(LIBC_INC) $(PORT_CFLAGS) -Os -g3 -std=gnu11 -Wall -Wextra -Wno-unused-parameter \
            -ffunction-sections -fdata-sections -fno-common \

@@ -132,15 +132,18 @@ static inline uint32_t parity32(uint32_t v)
     return v & 1u;
 }
 
-/* one raw transfer; req bits: 0 APnDP, 1 RnW, 2..3 A[3:2] (= address bits) */
+/* one raw transfer; req bits: 0 APnDP, 1 RnW, 2..3 A[3:2] (= address bits).
+ * IRQs off for the wire phase: the 1 ms LED tick must not stretch SWCLK. */
 static unsigned transfer_bits(unsigned req, uint32_t *data)
 {
     unsigned r = 0x81u | ((req & 0xFu) << 1) | (parity32(req & 0xFu) << 5);
+    unsigned ack;
 
+    __disable_irq();
     write_bits(r, 8);
     swd_io_dio_input();
     turnaround();
-    unsigned ack = read_bits(3);
+    ack = read_bits(3);
 
     if (ack == SWD_ACK_OK) {
         if (req & 2u) {
@@ -149,28 +152,32 @@ static unsigned transfer_bits(unsigned req, uint32_t *data)
             turnaround();
             swd_io_dio_output();
             write_bits(0, 2);
+            __enable_irq();
             if (p != parity32(v))
                 return SWD_ERR_PARITY;
             if (data)
                 *data = v;
-        } else {
-            turnaround();
-            swd_io_dio_output();
-            write_bits(*data, 32);
-            write_bits(parity32(*data), 1);
-            write_bits(0, 2);
+            return ack;
         }
+        turnaround();
+        swd_io_dio_output();
+        write_bits(*data, 32);
+        write_bits(parity32(*data), 1);
+        write_bits(0, 2);
+        __enable_irq();
         return ack;
     }
     if (ack == SWD_ACK_WAIT || ack == SWD_ACK_FAULT) {
         turnaround();
         swd_io_dio_output();
+        __enable_irq();
         return ack;
     }
     /* protocol error: let a possible data phase pass, then resync */
     read_bits(33);
     swd_io_dio_output();
     write_bits(0, 2);
+    __enable_irq();
     return SWD_ERR_NOACK;
 }
 
@@ -271,6 +278,7 @@ void swd_raw_write_noack(unsigned req, uint32_t data)
 {
     unsigned r = 0x81u | ((req & 0xFu) << 1) | (parity32(req & 0xFu) << 5);
 
+    __disable_irq();
     swd_io_dio_output();
     write_bits(r, 8);
     swd_io_dio_input();
@@ -281,36 +289,43 @@ void swd_raw_write_noack(unsigned req, uint32_t data)
     write_bits(data, 32);
     write_bits(parity32(data), 1);
     write_bits(0, 2);
+    __enable_irq();
 }
 
 void swd_raw_out(const uint8_t *data, unsigned bits)
 {
+    __disable_irq();
     swd_io_dio_output();
     while (bits) {
         unsigned n = bits > 8 ? 8 : bits;
         write_bits(*data++, n);
         bits -= n;
     }
+    __enable_irq();
 }
 
 void swd_raw_in(uint8_t *data, unsigned bits)
 {
+    __disable_irq();
     swd_io_dio_input();
     while (bits) {
         unsigned n = bits > 8 ? 8 : bits;
         *data++ = (uint8_t)read_bits(n);
         bits -= n;
     }
+    __enable_irq();
 }
 
 void swd_raw_idle(unsigned cycles)
 {
+    __disable_irq();
     swd_io_dio_output();
     while (cycles) {
         unsigned n = cycles > 32 ? 32 : cycles;
         write_bits(0, n);
         cycles -= n;
     }
+    __enable_irq();
 }
 
 void swd_invalidate(void)

@@ -48,6 +48,14 @@ static inline __attribute__((always_inline)) void swd_io_dio_input(void)
     *cr = (*cr & ~(0xFu << SWD_SHIFT(SWDIO_PIN))) | (GPIO_IN_FLOAT << SWD_SHIFT(SWDIO_PIN));
 }
 
+/* input with pull-up (ODR must be 1): for one-wire SDI release */
+static inline __attribute__((always_inline)) void swd_io_dio_input_pu(void)
+{
+    GPIO_BSRR(SWDIO_PORT) = 1u << SWDIO_PIN;
+    volatile uint32_t *cr = &SWD_CR(SWDIO_PORT, SWDIO_PIN);
+    *cr = (*cr & ~(0xFu << SWD_SHIFT(SWDIO_PIN))) | (GPIO_IN_PULL << SWD_SHIFT(SWDIO_PIN));
+}
+
 /* fixed length delay loop: aligned so its timing does not depend on where
  * the compiler places it (flash wait states / prefetch) */
 static inline __attribute__((always_inline)) void swd_io_delay(uint32_t n)

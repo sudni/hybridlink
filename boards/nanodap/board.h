@@ -1,10 +1,12 @@
 /*
  * NanoDAP (MuseLab / STM32F103C8/CB) @ 8 MHz HSE.
  *
- * Target SWD matches ST-Link/V2 and MuseLab nanoDAP V2.x (PB13/PB14 via 100R):
- *   PB13  SWCLK (target, via 100R)
- *   PB14  SWDIO (drive + sense on the same pin; no PB12 tap)
- *   PB0   target NRST (open drain, external pull-up)
+ * Target SWD matches MuseLab nanoDAP V2.x (validated with ST-Link + CMSIS-DAP
+ * against an RP2040). nanoDAP V2.1 sch: 100 Ω only on TCK (R10), TMS direct:
+ *   PB13  SWCLK / TCK  (via R10 100 Ω) — SDI target NRST on sticks
+ *         without a broken-out PB0 (QSZNTEC 5-pin: SWCLK→CH32 NRST)
+ *   PB14  SWDIO / TMS  (direct) — SDI here; PD1 + 1 kΩ to 3V3
+ *   PB0   target NRST for DAP/ST (open drain); unused on 5-pin sticks
  *   PA9   LED_RUN  (red, active high) — DAPLink HIC; some V2.x use PA8
  *   PB6   LED_CON  (blue, active high)
  *   PA15  USB_ENUM (PNP Q1 base; low = D+ pull-up) — some V2.x use PB15
@@ -27,8 +29,18 @@
 #define SWDIO_IN_PORT       GPIOB_BASE
 #define SWDIO_IN_PIN        14
 
+/* One-wire SDI on TMS/SWDIO (no series R on V2.1) */
+#define SDI_PORT            SWDIO_PORT
+#define SDI_PIN             SWDIO_PIN
+#define SDI_IN_PORT         SWDIO_IN_PORT
+#define SDI_IN_PIN          SWDIO_IN_PIN
+
 #define NRST_PORT           GPIOB_BASE
 #define NRST_PIN            0
+
+/* One-wire SDI: drive target NRST on SWCLK (header pin exists; PB0 does not) */
+#define SDI_NRST_PORT       SWCLK_PORT
+#define SDI_NRST_PIN        SWCLK_PIN
 
 #define LED_PORT            GPIOA_BASE
 #define LED_PIN             9               /* RUN (red) */

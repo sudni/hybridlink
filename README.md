@@ -126,27 +126,38 @@ VID/PID works (`DAP_USB_VID` / `DAP_USB_PID` at build time).
 
 ### WCH-Link mode
 
-WCH-Link mode makes the probe look like a WCH-Link (firmware 2.12, the
-CH549 based "WCH-Link-CH549") and debug WCH's CH32V RISC-V chips over
-RVSWD, WCH's two-wire debug interface, on the probe's SWCLK and SWDIO pins.
-Wiring to a CH32V board: SWCLK to the target's SWCLK/CLK (PA14 on a
-CH32V307), SWDIO to SWDIO/DIO (PA13), GND, and the VCP to a target UART.
+WCH-Link mode makes the probe look like a WCH-LinkE (firmware 2.12, probe
+type LinkE) and debug WCH's CH32V RISC-V chips. Two-wire targets use RVSWD
+on the probe's SWCLK and SWDIO pins; the CH32V003 uses one-wire SDI/SWIO on
+SWDIO (SWCLK is unused as clock; on NanoDAP it doubles as target NRST).
+
+Wiring:
+
+* CH32V20x/30x (RVSWD): SWCLK → target SWCLK/CLK (PA14 on a CH32V307),
+  SWDIO → SWDIO/DIO (PA13), GND, optional VCP to a target UART.
+* CH32V003 (SDI): SWDIO → target SWIO (PD1), GND, pull-up (~1 kΩ) on SWIO.
+  On NanoDAP sticks without a target-NRST header pin, also wire
+  **SWCLK → target NRST** (firmware 2.20+ holds reset during SDI attach so
+  a remapped PD1 can still be recovered). Target apps should avoid
+  remapping PD1 at the first instruction — leave a short startup delay
+  or keep PD1 as SWIO to prevent lockout without NRST.
 
 * Host tools: MounRiver Studio (download and debugging), WCH's OpenOCD
   (`program`, GDB), wlink (flash, erase, reset, read protection, memory,
-  registers) and probe-rs (it finds the probe by the product string
-  "WCH-Link").
+  registers) and probe-rs (product string "WCH-Link"; primary host for
+  CH32V003 bring-up — it flashes through DMI memory algorithms after
+  attach).
 * The probe answers the WCH-Link command set itself: version, attach,
   speed, debug module (DMI) access, reset, chip information, read
   protection, memory read, flash erase and programming. The flash routine
   that host tools upload for the probe to run is not used: the probe
-  programs the flash itself through the debug module (fast 256-byte page
-  erase and program), so no WCH binary is ever run or stored. A failed or
-  mismatching page stops the acknowledgements, so the host reports an
-  error.
-* Tested on a CH32V307 (CH32V30x family). The CH32V20x and V10x use the
-  same RVSWD and flash controller but are not tested yet; the one-wire SDI
-  of the CH32V003 is not supported.
+  programs the flash itself through the debug module (256-byte pages on
+  V20x/30x, 64-byte pages on V003), so no WCH binary is ever run or stored.
+  A failed or mismatching page stops the acknowledgements, so the host
+  reports an error.
+* Tested on a CH32V307 (CH32V30x / RVSWD). CH32V003 (SDI) attach, DMI, and
+  flash are implemented for probe-rs / wlink; CH32V20x and V10x use the
+  same RVSWD path but are not tested yet.
 * VCP: the command endpoints are 16 bytes instead of 64, so the serial port
   keeps 64-byte endpoints; 2 Mbit/s full duplex runs at about 180 kB/s.
 

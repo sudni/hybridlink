@@ -173,6 +173,14 @@ static inline void nvic_disable(unsigned irq) { NVIC_ICER(irq >> 5) = 1u << (irq
 #define ADC1_SQR3       REG32(ADC1_BASE + 0x34)
 #define ADC1_DR         REG32(ADC1_BASE + 0x4C)
 
+/* ---- TIM1 (used by SDI bitbang, openwch-compatible) ---- */
+#define TIM1_BASE       0x40012C00u
+#define TIM1_CR1        REG32(TIM1_BASE + 0x00)
+#define TIM1_PSC        REG32(TIM1_BASE + 0x28)
+#define TIM1_ARR        REG32(TIM1_BASE + 0x2C)
+#define TIM1_CNT        REG32(TIM1_BASE + 0x24)
+#define TIM1_EGR        REG32(TIM1_BASE + 0x14)
+
 /* ---- IWDG ---- */
 #define IWDG_KR         REG32(0x40003000u)
 

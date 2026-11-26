@@ -1,6 +1,6 @@
 /*
  * WCH-Link compatible command set (as observed on WCH-Link firmware 2.12,
- * docs/wch.md §3), on top of RVSWD and the RISC-V debug module.
+ * docs/wch.md §3), on top of RVSWD/SDI and the RISC-V debug module.
  *
  * Request  81 CMD LEN payload     reply  82 CMD LEN payload
  * Integers are big endian. Unknown commands get 82 81 01 ff.
@@ -10,6 +10,7 @@
 #include <string.h>
 #include "wch.h"
 #include "rvswd.h"
+#include "sdi.h"
 #include "rvdm.h"
 #include "wch_flash.h"
 #include "hal.h"
@@ -27,10 +28,11 @@
 #define CMD_CHIP_INFO        0x11
 
 #define FW_MAJOR 2
-#define FW_MINOR 12
-#define PROBE_TYPE_CH549 1
+#define FW_MINOR 53   /* dump EP: BE words like LinkE (wlink reverses) */
+/* LinkE: supports both RVSWD and one-wire SDI (CH32V003) */
+#define PROBE_TYPE_LINKE 2
 
-/* ESIG and flash option status on CH32V2xx/3xx */
+/* ESIG and flash option status on CH32V0xx/2xx/3xx */
 #define ESIG_FLASH_SIZE 0x1FFFF7E0u
 #define ESIG_UID        0x1FFFF7E8u
 #define FLASH_OBR       0x4002201Cu
@@ -59,7 +61,7 @@ static uint16_t reply1(uint8_t *r, uint8_t cmd, uint8_t v)
 }
 
 /* error replies start with 81 (community notes; not seen on fw 2.12) */
-static uint16_t error_reply(uint8_t *r, uint8_t reason)
+static uint16_t __attribute__((unused)) error_reply(uint8_t *r, uint8_t reason)
 {
     r[0] = 0x81; r[1] = reason; r[2] = 0x01; r[3] = 0x01;
     return 4;
@@ -95,13 +97,14 @@ static uint8_t family_of(uint32_t id)
 static void set_speed(uint8_t s)
 {
     static const uint8_t delay[] = { 0, 0, 3, 40 };
-    rvswd_set_delay(s < sizeof delay ? delay[s] : 0);
+    rvdm_set_delay(s < sizeof delay ? delay[s] : 0);
 }
 
 void wch_init(void)
 {
     hal_target_init();
     rvswd_init();
+    sdi_init();
     set_speed(1);
     wch_flash_init();
 }
@@ -157,12 +160,29 @@ static uint16_t control(uint8_t sub, uint8_t *r)
     uint8_t p[5];
     switch (sub) {
     case 0x01:
-        p[0] = FW_MAJOR; p[1] = FW_MINOR; p[2] = PROBE_TYPE_CH549; p[3] = 0;
+        p[0] = FW_MAJOR; p[1] = FW_MINOR; p[2] = PROBE_TYPE_LINKE; p[3] = 0;
         return reply(r, CMD_CONTROL, p, 4);
     case 0x02:
-        if (!rvdm_attach(&chip_id))
-            return error_reply(r, 0x55);         /* cannot connect */
+        if (!rvdm_attach(&chip_id, family)) {
+            /*
+             * Diagnostic payload for `wlink -vv`. Must be a SHORT packet on
+             * the 16-byte CMD EP — exactly 16 B is a full MPS and the host
+             * (64 B URB) waits forever for more data.
+             * Layout: CAP, STATUS, CHIPID (BE); high nibble of last status
+             * byte overwritten? Keep 15 B: CAP+STATUS+CHIPID only.
+             */
+            uint32_t cap, st, id;
+            uint8_t ph;
+            rvdm_attach_probe(&cap, &st, &id, &ph);
+            (void)ph;
+            r[0] = 0x81; r[1] = 0x55; r[2] = 12;
+            put_be32(&r[3], cap);
+            put_be32(&r[7], st);
+            put_be32(&r[11], id);
+            return 15;
+        }
         family = family_of(chip_id);
+        wch_flash_set_family(family);
         p[0] = family;
         put_be32(&p[1], chip_id);
         return reply(r, CMD_CONTROL, p, 5);
@@ -258,6 +278,7 @@ uint16_t wch_execute(const uint8_t *q, uint16_t len, uint8_t *r)
         if (n < 2)
             return unknown(r);
         family = p[0];
+        wch_flash_set_family(family);
         set_speed(p[1]);
         return reply1(r, CMD_SPEED, 0x01);
     case CMD_DMI:
@@ -320,10 +341,13 @@ void wch_task(void)
         reading = false;
         return;
     }
+    /* Genuine link ships each word big-endian on EP 0x82; wlink then
+     * reverses every 4 bytes ("Fix endian"). Send BE so that matches. */
     for (uint32_t i = 0; i < n; i += 4) {
         uint32_t w = 0;
         rvdm_mem_read32(rd_addr + rd_pos + i, &w);
-        memcpy(&buf[i], &w, 4);                 /* little endian, as in memory */
+        w = __builtin_bswap32(w);
+        memcpy(&buf[i], &w, 4);
     }
     rvdm_end(run);
     wch_usb_data_in(buf, (uint16_t)n);

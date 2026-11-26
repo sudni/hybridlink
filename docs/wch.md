@@ -10,8 +10,8 @@ WCH-Link. No WCH code and no GPL code is copied, and none should be.
 
 The CH32V1/2/3 series use WCH's two-wire "RVSWD" on PA13 (DIO) / PA14 (CLK).
 It is **not** ARM SWD. It carries accesses to the RISC-V DTM `dmi` register
-(7-bit address, 32-bit data, 2-bit op/status). (CH32V003/00x use the
-one-wire SDI instead; out of scope for now.)
+(7-bit address, 32-bit data, 2-bit op/status). CH32V003/00x use the
+one-wire SDI/SWIO instead (see §1b); the USB command set is the same.
 
 Line rules (RINS, fxsheep wiki):
 - CLK and DIO idle high; host always initiates; point to point, no addressing.
@@ -83,6 +83,48 @@ bit-level script engine behind HL vendor requests 07/08 (`app/rvswd_raw.c`).
 Jolt Connect: SWCLK = PB13, SWDIO driver = PB14 (through series R), sense = PB12.
 The split driver/sense pins suit RVSWD's half-duplex without a turnaround clock
 (host must release PB14 right after the last host bit).
+
+## 1b. One-wire SDI/SWIO (CH32V003)
+
+Same DMI payload as RVSWD; only the physical encoding differs. Idle HIGH
+(pull-up on SWIO/PD1). Host encodes bits as LOW pulse width (LinkE 2.22 /
+[pico-rvd](https://github.com/Apache02/pico-rvd) on V003): **1 ≈ 200–260 ns**,
+**0 ≈ 750–860 ns**, then ~300 ns HIGH. Packet (41 pulses, no parity):
+`start(1) + addr[6:0] + R/W + data[31:0]` (R/W 1 = write on the wire). On
+read, the host clocks 32 reply bits (brief LOW, release, sample immediately
+whether the target held LOW). Stop ≥ ~2.25 µs HIGH between packets. Bus
+reset: openwch `ResetDeviceSWD` holds LOW **20 ms** (hellotanjent ~2 ms;
+pico-rvd ~8 µs also works on Pico PIO).
+
+Wire bits are *not* inverted. pico-rvd's `((~addr)<<1)|rw` / `~data` only
+compensates for PIO FIFO-1 → long pulse; our bitbang sends logical levels
+directly (short=1, long=0).
+
+Before useful accesses, unlock the DTM: write `0x5AA50400` to `0x7E`
+(SHDWCFGR) then `0x7D` (CFGR) — OUTEN — then `dmcontrol` 0 → 1. Chip ID is
+at `0x7F` (e.g. `0x00300500`); CAP/`CPBR` should read `0x00010403`.
+hybridlink's `app/sdi.c` bit-bangs this on the probe SWDIO pin. Boards may
+define `SDI_NRST_*` (NanoDAP: SWCLK) so attach can hold target NRST while
+PD1 is remuxed; otherwise SWCLK is floated. Attach prefers SDI when the
+host speed command already set family `0x09`, otherwise tries RVSWD then
+SDI.
+
+**PD1 lockout:** if user firmware remaps PD1 away from SWIO at the very
+start of `main`, a probe without NRST cannot re-enter debug until a power
+cycle. Mitigations: (1) wire target NRST — hybridlink asserts it via
+`SDI_NRST_*` (NanoDAP: SWCLK), bus-resets + unlocks **while NRST is held**
+(so PD1 cannot remux), then releases; if that fails it releases and races
+an 8 µs reset + unlock; (2) in the target app, keep PD1 as SWIO, or delay
+any PD1 GPIO/AF change by tens of ms after reset.
+
+Flash on V003 uses **64-byte** fast pages: FTER erase, then FTPG + BUF_RST,
+per-word store + BUF_LOAD, ADDR, FTPG|STRT (bit 6 — not V30x PGSTRT).
+probe-rs flashes via DMI memory algorithms after attach; wlink still uses
+the USB program path and the probe drives FTPG itself (host flash_op blob
+discarded, same as V307).
+
+The probe reports LinkE type (`2`) so hosts that refuse CH549 for RV32EC /
+1-wire accept V003.
 
 ## 2. Debug module (CH32V307)
 
@@ -366,8 +408,12 @@ Open:
   own error report has never been seen.
 - Speed codes 2/3 have rough delays only.
 - Busy/fail RVSWD status codes are not seen yet.
-- CH32V2xx/V1xx and CH32V003 (SDI) are untested.
-- The WCH-LinkE (`1a86:8010` with another probe type) is not emulated.
+- CH32V2xx/V1xx RVSWD are untested on hardware.
+- CH32V003 SDI is implemented (`app/sdi.c`, 64-byte flash path); hardware
+  verification with probe-rs is pending.
+- SDI 33-pulse fast-read / bypass packets are not implemented.
+- SDI pulse-width acceptance limits and pull-up electrical margins are
+  unmeasured on hybridlink hardware.
 
 ## Sources
 

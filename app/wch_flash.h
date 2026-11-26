@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 void wch_flash_init(void);
+void wch_flash_set_family(uint8_t family);      /* 0x09 = CH32V003 (64 B pages) */
 bool wch_flash_mass_erase(void);
 bool wch_flash_protect(void);
 bool wch_flash_unprotect(void);

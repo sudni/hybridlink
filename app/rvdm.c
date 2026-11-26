@@ -2,10 +2,12 @@
  * RISC-V debug module helpers (debug spec 0.13), written from the spec.
  * Memory goes through the program buffer: s0 holds the address, s1 the
  * data; both are saved and restored around a series of accesses.
+ * DMI rides either two-wire RVSWD or one-wire SDI.
  * SPDX-License-Identifier: MIT
  */
 #include "rvdm.h"
 #include "rvswd.h"
+#include "sdi.h"
 #include "hal.h"
 
 #define ABSTRACTCS_BUSY   (1u << 12)
@@ -25,18 +27,37 @@
 
 static uint32_t saved_s0, saved_s1;
 static uint32_t progbuf_op;             /* instruction now in progbuf0 */
+static rvdm_phy_t phy = RVDM_PHY_RVSWD;
+static uint32_t attach_cap, attach_status, attach_id;
+static uint8_t attach_phy;
+
+void rvdm_set_phy(rvdm_phy_t p)
+{
+    phy = p;
+}
+
+rvdm_phy_t rvdm_phy(void)
+{
+    return phy;
+}
+
+void rvdm_set_delay(uint32_t d)
+{
+    rvswd_set_delay(d);
+    sdi_set_delay(d);
+}
 
 uint8_t rvdm_read(uint8_t addr, uint32_t *val)
 {
-    return rvswd_read(addr, val);
+    return phy == RVDM_PHY_SDI ? sdi_read(addr, val) : rvswd_read(addr, val);
 }
 
 uint8_t rvdm_write(uint8_t addr, uint32_t val)
 {
-    return rvswd_write(addr, val);
+    return phy == RVDM_PHY_SDI ? sdi_write(addr, val) : rvswd_write(addr, val);
 }
 
-static bool wait_status(uint32_t mask)
+static bool wait_status_ms(uint32_t mask, uint32_t ms)
 {
     uint32_t t = hal_millis(), s;
     do {
@@ -44,26 +65,158 @@ static bool wait_status(uint32_t mask)
             return false;
         if (s & mask)
             return true;
-    } while (hal_millis() - t < 100u);
+    } while (hal_millis() - t < ms);
     return false;
 }
 
-bool rvdm_attach(uint32_t *chip_id)
+static bool wait_status(uint32_t mask)
 {
-    rvswd_init();
-    rvswd_wake();
+    return wait_status_ms(mask, 100u);
+}
+
+static void phy_init(rvdm_phy_t p)
+{
+    phy = p;
+    if (p == RVDM_PHY_SDI) {
+        sdi_init();
+        /* sdi_wake() runs per pinout attempt inside try_attach */
+    } else {
+        rvswd_init();
+        rvswd_wake();
+    }
+}
+
+void rvdm_attach_probe(uint32_t *cap, uint32_t *status, uint32_t *id,
+                       uint8_t *phy_used)
+{
+    if (cap)
+        *cap = attach_cap;
+    if (status)
+        *status = attach_status;
+    if (id)
+        *id = attach_id;
+    if (phy_used)
+        *phy_used = attach_phy;
+}
+
+static bool try_attach_sdi_once(void)
+{
+    /* funprog InitializeSWDSWIO: unlock twice, dmactive twice, check CFGR */
+    rvdm_write(DM_WCH_SHDWCFGR, DM_WCH_OUTEN);
+    rvdm_write(DM_WCH_CFGR, DM_WCH_OUTEN);
+    rvdm_write(DM_WCH_SHDWCFGR, DM_WCH_OUTEN);
+    rvdm_write(DM_WCH_CFGR, DM_WCH_OUTEN);
     rvdm_write(DM_DMCONTROL, DMCONTROL_DMACTIVE);
-    if (rvdm_write(DM_DMCONTROL, DMCONTROL_DMACTIVE) != DMI_OK)
+    rvdm_write(DM_DMCONTROL, DMCONTROL_DMACTIVE);
+    rvdm_read(DM_WCH_CPBR, &attach_cap);
+    if (attach_cap == 0x00010403u)
+        return true;
+    /* Some parts answer CFGR/CHIPID before CAP looks right */
+    {
+        uint32_t cfgr = 0xffffffffu, id = 0xffffffffu;
+        rvdm_read(DM_WCH_CFGR, &cfgr);
+        rvdm_read(DM_WCH_CHIPID, &id);
+        if (cfgr != 0xffffffffu && cfgr != 0u)
+            attach_status = cfgr; /* stash for 0x55 diag if we still fail */
+        if ((id >> 20) == 0x003u) {
+            attach_id = id;
+            attach_cap = (attach_cap == 0xffffffffu) ? 0x00010403u : attach_cap;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool try_attach(uint32_t *chip_id)
+{
+    attach_phy = (uint8_t)phy;
+    attach_cap = attach_status = attach_id = 0xffffffffu;
+
+    if (phy == RVDM_PHY_SDI) {
+        /* Pass 0: bus reset only (LinkE often needs no NRST).
+         * Pass 1: hold NRST (PD1 lockout).
+         * Pass 2: release NRST and race remux. */
+        uint8_t n = sdi_preset_count();
+        uint32_t best_cap = 0xffffffffu;
+        /* SWDIO only — swap polluted STATUS when timing returned ff. */
+        sdi_set_pinout(0);
+        for (uint8_t pass = 0; pass < 2; pass++) {
+            if (pass == 0)
+                sdi_wake();
+            else
+                sdi_wake_run();
+            for (uint8_t i = 0; i < n; i++) {
+                sdi_set_preset(i);
+                if (i) {
+                    sdi_write(DM_WCH_SHDWCFGR, 0);
+                    hal_delay_us(50);
+                }
+                if (try_attach_sdi_once())
+                    goto sdi_ok;
+                if (attach_cap != 0xffffffffu && attach_cap != 0u)
+                    best_cap = attach_cap;
+            }
+        }
+        if (best_cap != 0xffffffffu)
+            attach_cap = best_cap;
+        attach_status = sdi_line_probe();
+        if (attach_id == 0xffffffffu)
+            rvdm_read(DM_WCH_CHIPID, &attach_id);
+        return false;
+    sdi_ok:
+        sdi_leave_reset();
+    } else {
+        rvdm_write(DM_DMCONTROL, 0);
+        rvdm_write(DM_DMCONTROL, DMCONTROL_DMACTIVE);
+    }
+    rvdm_write(DM_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    rvdm_write(DM_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    rvdm_write(DM_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    if (rvdm_read(DM_DMSTATUS, &attach_status) != DMI_OK ||
+        attach_status == 0u || attach_status == 0xffffffffu)
         return false;
     progbuf_op = 0;
-    uint32_t id;
-    if (rvdm_read(DM_WCH_CHIPID, &id) != DMI_OK)
+    if (rvdm_read(DM_WCH_CHIPID, &attach_id) != DMI_OK)
         return false;
-    *chip_id = id;
-    /* the genuine link leaves the hart halted after attach (every trace
-     * reads dmstatus 0x382 next); hosts read registers right away */
-    rvdm_halt();
+    if (attach_id == 0u || attach_id == 0xffffffffu)
+        return false;
+    /* V003 chip id is 0x003xxxxx; reject obvious RVSWD false positives */
+    if (phy == RVDM_PHY_SDI && (attach_id >> 20) != 0x003u)
+        return false;
+    *chip_id = attach_id;
+    /* short wait only — wlink USB I/O times out at 100 ms */
+    if (!(attach_status & DMSTATUS_ALLHALTED))
+        wait_status_ms(DMSTATUS_ALLHALTED, 20u);
+    rvdm_write(DM_DMCONTROL, DMCONTROL_DMACTIVE);
     return true;
+}
+
+bool rvdm_attach(uint32_t *chip_id, uint8_t family_hint)
+{
+    /*
+     * wlink --chip CH32V003 sends family 0x09: SDI only (do not fall back to
+     * RVSWD — bit-banging CLK on a live SWIO line can false-OK and then
+     * stall in halt for 100 ms past the host USB timeout).
+     * probe-rs still defaults to 0x01: try SDI then RVSWD.
+     */
+    rvdm_phy_t order[2];
+    unsigned n = 2;
+    if (family_hint == 0x09) {
+        order[0] = RVDM_PHY_SDI;
+        n = 1;
+    } else if (family_hint == 0x05 || family_hint == 0x06) {
+        order[0] = RVDM_PHY_RVSWD;
+        order[1] = RVDM_PHY_SDI;
+    } else {
+        order[0] = RVDM_PHY_SDI;
+        order[1] = RVDM_PHY_RVSWD;
+    }
+    for (unsigned i = 0; i < n; i++) {
+        phy_init(order[i]);
+        if (try_attach(chip_id))
+            return true;
+    }
+    return false;
 }
 
 bool rvdm_is_halted(void)

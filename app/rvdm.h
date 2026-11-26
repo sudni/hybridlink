@@ -16,6 +16,10 @@
 #define DM_ABSTRACTCS   0x16
 #define DM_COMMAND      0x17
 #define DM_PROGBUF0     0x20
+/* QingKe DTM config (not in the RISC-V DM map) */
+#define DM_WCH_CPBR     0x7C
+#define DM_WCH_CFGR     0x7D
+#define DM_WCH_SHDWCFGR 0x7E
 #define DM_WCH_CHIPID   0x7F
 
 #define DMCONTROL_HALTREQ   (1u << 31)
@@ -28,10 +32,25 @@
 #define DMSTATUS_ALLRUNNING (1u << 11)
 #define DMSTATUS_ALLHALTED  (1u << 9)
 
+/* OUTEN unlock key written to SHDWCFGR then CFGR before useful DMI */
+#define DM_WCH_OUTEN    0x5AA50400u
+
+typedef enum {
+    RVDM_PHY_RVSWD = 0,
+    RVDM_PHY_SDI   = 1,
+} rvdm_phy_t;
+
+void rvdm_set_phy(rvdm_phy_t phy);
+rvdm_phy_t rvdm_phy(void);
+void rvdm_set_delay(uint32_t d);
+
 uint8_t rvdm_read(uint8_t addr, uint32_t *val);
 uint8_t rvdm_write(uint8_t addr, uint32_t val);
 
-bool rvdm_attach(uint32_t *chip_id);
+/* family_hint 0x09 prefers SDI; otherwise RVSWD then SDI fallback */
+bool rvdm_attach(uint32_t *chip_id, uint8_t family_hint);
+/* last CAP / DMSTATUS / CHIPID seen during attach (for 0x55 diagnostics) */
+void rvdm_attach_probe(uint32_t *cap, uint32_t *status, uint32_t *id, uint8_t *phy_used);
 bool rvdm_is_halted(void);
 bool rvdm_halt(void);
 bool rvdm_resume(void);
